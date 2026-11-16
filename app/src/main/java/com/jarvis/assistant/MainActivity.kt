@@ -32,7 +32,12 @@ class MainActivity : Activity() {
             this.text = t; textSize = size; setTextColor(color); gravity = Gravity.CENTER
             setPadding(0, p / 2, 0, p / 2)
         }
-        root.addView(text("J.A.R.V.I.S", 34f, Color.parseColor("#7DD3FC")))
+        val logo = ImageView(this).apply {
+            setImageResource(R.drawable.ic_launcher_foreground)
+            layoutParams = LinearLayout.LayoutParams(p * 6, p * 6)
+        }
+        root.addView(logo)
+        root.addView(text("J.A.R.V.I.S", 30f, Color.parseColor("#7DD3FC")))
         status = text("", 16f, Color.WHITE)
         root.addView(status)
 
