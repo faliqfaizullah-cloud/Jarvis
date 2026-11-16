@@ -38,6 +38,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         @Volatile var onReply: ((String) -> Unit)? = null
     }
     private lateinit var skills: Skills
+    private lateinit var overlay: OrbOverlay
     private val history = ArrayList<Pair<String, String>>()
     private var aiBusy = false
 
@@ -76,6 +77,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     override fun onCreate() {
         super.onCreate()
         skills = Skills(this)
+        overlay = OrbOverlay(this)
         getSystemService(NotificationManager::class.java)
             .createNotificationChannel(NotificationChannel(CH, "Jarvis", NotificationManager.IMPORTANCE_LOW))
         getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -104,6 +106,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             running = false
+            overlay.cancel()
             handler.removeCallbacksAndMessages(null)
             resetRecognizer()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -267,14 +270,18 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (pkg == null && SystemClock.elapsedRealtime() - cacheTime > 10_000) { loadApps(); pkg = findPackage(q) }
         val launch = pkg?.let { packageManager.getLaunchIntentForPackage(it) }
         if (launch == null) { reply("Sorry boss, I couldn't find $name on your phone."); return }
-        try {
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(launch)
-            lastOpened = pkg
-            reply(listOf("Alright boss, I opened it up for you.",
-                "Done, boss. It's open.", "Right away, boss. Opening it now.").random())
-        } catch (e: Exception) {
-            reply("I couldn't open it, boss. Please allow display over other apps in my settings.")
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val phrases = listOf("Alright boss, I opened it up for you.",
+            "Done, boss. It's open.", "Right away, boss. Opening it now.")
+        // Glossy glowing sphere animation, then the app opens at its peak.
+        overlay.play {
+            try {
+                startActivity(launch)
+                lastOpened = pkg
+                reply(phrases.random())
+            } catch (e: Exception) {
+                reply("I couldn't open it, boss. Please allow display over other apps in my settings.")
+            }
         }
     }
 
@@ -365,6 +372,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         running = false
+        overlay.cancel()
         handler.removeCallbacksAndMessages(null)
         resetRecognizer()
         tts?.shutdown()

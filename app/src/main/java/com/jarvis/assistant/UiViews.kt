@@ -38,6 +38,10 @@ class BackgroundView(c: Context) : View(c) {
 class OrbView(c: Context) : View(c) {
     var active = false
         set(v) { field = v; invalidate() }
+    /** Glossy bright-blue sphere with a strong highlight (used by the launch animation). */
+    var glossy = false
+    private val glossBody = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val glossShine = Paint(Paint.ANTI_ALIAS_FLAG)
     private var angle = 0f
     private var cx = 0f
     private var cy = 0f
@@ -60,6 +64,7 @@ class OrbView(c: Context) : View(c) {
 
     fun start() { if (!anim.isRunning) anim.start() }
     fun stop() { anim.cancel() }
+    fun setSpinDuration(ms: Long) { anim.duration = ms }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         cx = w / 2f; cy = h / 2f; r = min(w, h) * 0.26f
@@ -69,6 +74,11 @@ class OrbView(c: Context) : View(c) {
         bodyPaint.shader = RadialGradient(cx - r * 0.3f, cy - r * 0.35f, r * 1.4f,
             intArrayOf(col("#0E2F6E"), col("#07163A"), col("#02060F")),
             floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP)
+        glossBody.shader = RadialGradient(cx - r * 0.3f, cy - r * 0.35f, r * 1.3f,
+            intArrayOf(col("#8FCBFF"), col("#2F86FF"), col("#0B3CA8"), col("#04123A")),
+            floatArrayOf(0f, 0.35f, 0.8f, 1f), Shader.TileMode.CLAMP)
+        glossShine.shader = RadialGradient(cx - r * 0.38f, cy - r * 0.45f, r * 0.5f,
+            intArrayOf(col("#D9FFFFFF"), col("#00FFFFFF")), null, Shader.TileMode.CLAMP)
         shine.shader = RadialGradient(cx - r * 0.35f, cy - r * 0.4f, r * 0.7f,
             intArrayOf(col("#2EFFFFFF"), col("#00FFFFFF")), null, Shader.TileMode.CLAMP)
         val sweep = SweepGradient(cx, cy,
@@ -87,8 +97,14 @@ class OrbView(c: Context) : View(c) {
         canvas.scale(s, s, cx, cy)
         glowPaint.alpha = if (active) 255 else 130
         canvas.drawCircle(cx, cy, r * 1.9f, glowPaint)
-        canvas.drawCircle(cx, cy, r, bodyPaint)
-        canvas.drawCircle(cx, cy, r * 0.92f, shine)
+        if (glossy) {
+            canvas.drawCircle(cx, cy, r, glossBody)
+            canvas.drawCircle(cx, cy, r * 0.92f, shine)
+            canvas.drawCircle(cx - r * 0.38f, cy - r * 0.45f, r * 0.5f, glossShine)
+        } else {
+            canvas.drawCircle(cx, cy, r, bodyPaint)
+            canvas.drawCircle(cx, cy, r * 0.92f, shine)
+        }
 
         val a = if (active) 255 else 150
         ribbon.alpha = a; ribbonGlow.alpha = (a * 0.6f).toInt()
