@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -29,6 +30,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         const val ACTION_STOP = "com.jarvis.assistant.STOP"
         const val ACTION_COMMAND = "com.jarvis.assistant.COMMAND"
         const val CH = "jarvis"
+        const val CH_REPLY = "jarvis_replies"
         const val MODEL = "claude-haiku-5-5"
         const val SYSTEM = "You are Jarvis, a concise, warm voice assistant on the user's Android phone. " +
             "Address the user as boss. Answer in at most three short sentences unless asked to draft or write something, " +
@@ -76,6 +78,11 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         skills = Skills(this)
         getSystemService(NotificationManager::class.java)
             .createNotificationChannel(NotificationChannel(CH, "Jarvis", NotificationManager.IMPORTANCE_LOW))
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(CH_REPLY, "Jarvis replies", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Jarvis's answers to your commands"
+                enableVibration(true)
+            })
         tts = TextToSpeech(this, this)
         Thread { loadApps() }.start()
     }
@@ -132,6 +139,28 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (t == lastNotif) return
         lastNotif = t
         getSystemService(NotificationManager::class.java).notify(1, notif(t))
+    }
+
+    // Normal (heads-up, with sound) notification for each reply. Skipped while the app is on screen.
+    private fun postReply(text: String) {
+        if (onReply != null) return
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE)
+        val n = NotificationCompat.Builder(this, CH_REPLY)
+            .setSmallIcon(R.drawable.ic_stat_jarvis)
+            .setContentTitle("Jarvis")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setOnlyAlertOnce(false)
+            .setAutoCancel(true)
+            .setContentIntent(open)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(2, n)
     }
 
     // ---------- Listening (single reused recognizer = faster restarts) ----------
@@ -325,7 +354,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun reply(text: String) {
-        updateNotif(text)
+        postReply(text)
         onReply?.invoke(text)
         if (!prefs().getBoolean("voice_on", true) || !ttsReady) return
         speaking = true

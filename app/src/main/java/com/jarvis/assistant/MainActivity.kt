@@ -233,6 +233,9 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), 2)
         })
         panel.addView(glassButton("What can I say?") { showHelp() })
+        panel.addView(glassButton("Notification settings") {
+            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+        })
         panel.addView(glassButton("Allow display over other apps") {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         })
