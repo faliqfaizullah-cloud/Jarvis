@@ -181,3 +181,10 @@ class SlidersView(c: Context) : View(c) {
         }
     }
 }
+
+/** ScrollView that never grows taller than maxH. */
+class MaxHeightScroll(c: Context, private val maxH: Int) : android.widget.ScrollView(c) {
+    override fun onMeasure(w: Int, h: Int) {
+        super.onMeasure(w, MeasureSpec.makeMeasureSpec(maxH, MeasureSpec.AT_MOST))
+    }
+}

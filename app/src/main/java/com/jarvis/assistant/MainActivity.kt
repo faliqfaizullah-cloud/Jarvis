@@ -2,6 +2,7 @@ package com.jarvis.assistant
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
 import android.content.Intent
@@ -16,6 +17,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
@@ -29,6 +31,10 @@ class MainActivity : Activity() {
     private lateinit var orb: OrbView
     private lateinit var wave: WaveView
     private lateinit var input: EditText
+    private lateinit var greetingView: TextView
+    private lateinit var headlineView: TextView
+    private lateinit var answerCard: LinearLayout
+    private lateinit var answerText: TextView
 
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -69,16 +75,34 @@ class MainActivity : Activity() {
         content.addView(Space(ctx), LinearLayout.LayoutParams(0, 0, 0.8f))
         orb = OrbView(ctx)
         content.addView(orb, LinearLayout.LayoutParams(dp(260), dp(260)))
-        content.addView(TextView(ctx).apply {
+        greetingView = TextView(ctx).apply {
             text = "Hello boss"; textSize = 16f; setTextColor(col("#A9B4C8")); gravity = Gravity.CENTER
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(6) })
-        content.addView(TextView(ctx).apply {
+        }
+        content.addView(greetingView, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(6) })
+        headlineView = TextView(ctx).apply {
             text = "How can I help\nyou today?"; textSize = 32f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setLineSpacing(0f, 1.05f)
             setShadowLayer(28f, 0f, 0f, col("#885AA0FF"))
-        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(14) })
+        }
+        content.addView(headlineView, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(14) })
+
+        // ---- answer card (shows Jarvis replies; tap to dismiss) ----
+        answerText = TextView(ctx).apply { textSize = 18f; setTextColor(Color.WHITE); setLineSpacing(0f, 1.1f) }
+        val answerScroll = MaxHeightScroll(ctx, dp(220)).apply { isVerticalScrollBarEnabled = false; addView(answerText) }
+        answerCard = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(col("#55123068"), col("#7728559E"))).apply {
+                cornerRadius = dp(26).toFloat(); setStroke(dp(1), col("#55FFFFFF"))
+            }
+            addView(answerScroll)
+            setOnClickListener { hideAnswer() }
+        }
+        content.addView(answerCard, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(dp(24), dp(10), dp(24), dp(6)) })
         content.addView(Space(ctx), LinearLayout.LayoutParams(0, 0, 1.3f))
 
         // ---- glowing glass "Ask anything..." pill ----
@@ -123,6 +147,19 @@ class MainActivity : Activity() {
         ViewCompat.requestApplyInsets(root)
     }
 
+    private fun showAnswer(t: String) {
+        answerText.text = t
+        answerCard.visibility = View.VISIBLE
+        greetingView.visibility = View.GONE
+        headlineView.visibility = View.GONE
+    }
+
+    private fun hideAnswer() {
+        answerCard.visibility = View.GONE
+        greetingView.visibility = View.VISIBLE
+        headlineView.visibility = View.VISIBLE
+    }
+
     // ---- typed commands go to the running service ----
     private fun sendTyped(t: String) {
         val text = t.trim()
@@ -153,6 +190,7 @@ class MainActivity : Activity() {
     }
 
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
+        if (code != 1) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startJarvis()
         else Toast.makeText(this, "Microphone permission is required", Toast.LENGTH_LONG).show()
     }
@@ -163,8 +201,11 @@ class MainActivity : Activity() {
         wave.active = on
     }
 
-    override fun onResume() { super.onResume(); orb.start(); wave.start(); refresh() }
-    override fun onPause() { orb.stop(); wave.stop(); super.onPause() }
+    override fun onResume() {
+        super.onResume(); orb.start(); wave.start(); refresh()
+        JarvisService.onReply = { t: String -> showAnswer(t) }
+    }
+    override fun onPause() { JarvisService.onReply = null; orb.stop(); wave.stop(); super.onPause() }
 
     // ---- settings sheet ----
     private fun showSettings() {
@@ -187,6 +228,11 @@ class MainActivity : Activity() {
         panel.addView(switchRow("Jarvis voice replies", prefs().getBoolean("voice_on", true)) {
             prefs().edit().putBoolean("voice_on", it).apply()
         })
+        panel.addView(glassButton("Set AI key (Claude)") { showKeyDialog() })
+        panel.addView(glassButton("Allow contacts (call & text)") {
+            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), 2)
+        })
+        panel.addView(glassButton("What can I say?") { showHelp() })
         panel.addView(glassButton("Allow display over other apps") {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         })
@@ -194,10 +240,54 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
         })
         panel.addView(glassButton("Close") { d.dismiss() })
-        d.setContentView(panel)
+        val scroll = MaxHeightScroll(this, (resources.displayMetrics.heightPixels * 0.85f).toInt())
+        scroll.addView(panel)
+        d.setContentView(scroll)
         d.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         d.window?.setLayout((resources.displayMetrics.widthPixels * 0.9f).toInt(), WRAP)
         d.show()
+    }
+
+    private fun showKeyDialog() {
+        val et = EditText(this).apply {
+            hint = "Paste your Claude API key"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(prefs().getString("api_key", ""))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("AI key")
+            .setMessage("Get a key at console.anthropic.com. It is stored only on this phone.")
+            .setView(et)
+            .setPositiveButton("Save") { _, _ ->
+                prefs().edit().putString("api_key", et.text.toString().trim()).apply()
+                Toast.makeText(this, "AI key saved", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showHelp() {
+        AlertDialog.Builder(this)
+            .setTitle("What can I say?")
+            .setMessage(
+                "Hey Jarvis, then:\n\n" +
+                "• open / close WhatsApp\n" +
+                "• set a timer for 10 minutes\n" +
+                "• remind me to call Sam in 30 minutes\n" +
+                "• set an alarm for 7:30 am\n" +
+                "• take a note: buy milk / read my notes\n" +
+                "• call Mom / text Sam saying I'm late\n" +
+                "• search for best laptops\n" +
+                "• navigate to the airport\n" +
+                "• play lofi music\n" +
+                "• flashlight on / volume up\n" +
+                "• battery level / weather\n" +
+                "• what is 15 percent of 240\n" +
+                "• good morning (daily briefing)\n" +
+                "• copy that / share that (last AI answer)\n" +
+                "• anything else: Jarvis asks AI (needs your AI key)")
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     private fun switchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit): Switch =

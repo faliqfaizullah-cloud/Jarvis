@@ -17,11 +17,27 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 
 class JarvisService : Service(), TextToSpeech.OnInitListener {
-    companion object { const val ACTION_STOP = "com.jarvis.assistant.STOP"; const val ACTION_COMMAND = "com.jarvis.assistant.COMMAND"; const val CH = "jarvis" }
+    companion object {
+        const val ACTION_STOP = "com.jarvis.assistant.STOP"
+        const val ACTION_COMMAND = "com.jarvis.assistant.COMMAND"
+        const val CH = "jarvis"
+        const val MODEL = "claude-haiku-5-5"
+        const val SYSTEM = "You are Jarvis, a concise, warm voice assistant on the user's Android phone. " +
+            "Address the user as boss. Answer in at most three short sentences unless asked to draft or write something, " +
+            "then keep it under 150 words. Plain speakable text only: no markdown, no bullet symbols, no emojis."
+        @Volatile var onReply: ((String) -> Unit)? = null
+    }
+    private lateinit var skills: Skills
+    private val history = ArrayList<Pair<String, String>>()
+    private var aiBusy = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
@@ -57,6 +73,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     override fun onCreate() {
         super.onCreate()
+        skills = Skills(this)
         getSystemService(NotificationManager::class.java)
             .createNotificationChannel(NotificationChannel(CH, "Jarvis", NotificationManager.IMPORTANCE_LOW))
         tts = TextToSpeech(this, this)
@@ -182,17 +199,18 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             awaitingUntil = SystemClock.elapsedRealtime() + 8000
             reply("Yes boss, I'm listening."); return
         }
+        skills.tryHandle(cmd)?.let { reply(it); return }
         val open = openRegex.find(cmd)
         val close = closeRegex.find(cmd)
         when {
             open != null -> openApp(open.groupValues[3])
             close != null -> closeApp(close.groupValues[4].ifEmpty { "it" })
-            cmd.contains("time") -> reply("It's " + SimpleDateFormat("h:mm a", Locale.US).format(Date()) + ", boss.")
-            cmd.contains("date") || cmd.contains("day is it") ->
+            Regex("^(what's the time|what is the time|what time is it|tell me the time|the time|time)$").matches(cmd) -> reply("It's " + SimpleDateFormat("h:mm a", Locale.US).format(Date()) + ", boss.")
+            Regex("^(what's the date|what is the date|what's today's date|what day is it|what day is it today|the date|date)$").matches(cmd) ->
                 reply("Today is " + SimpleDateFormat("EEEE, MMMM d", Locale.US).format(Date()) + ", boss.")
-            cmd.contains("how are you") -> reply("Fully operational and ready to work, boss.")
-            cmd.contains("thank") -> reply("Anytime, boss.")
-            else -> reply("Sorry boss, I can't do that yet. Try saying open or close and an app name.")
+            cmd.startsWith("how are you") -> reply("Fully operational and ready to work, boss.")
+            cmd.startsWith("thank") -> reply("Anytime, boss.")
+            else -> askAi(cmd)
         }
     }
 
@@ -231,6 +249,64 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    // ---------- AI brain (Claude API) ----------
+    private fun askAi(q: String) {
+        val key = prefs().getString("api_key", "")?.trim().orEmpty()
+        if (key.isEmpty()) {
+            reply("I need an AI key to answer that, boss. Add it in my settings."); return
+        }
+        if (aiBusy) { reply("One moment, boss. I'm still thinking."); return }
+        aiBusy = true
+        updateNotif("Thinking…"); onReply?.invoke("Thinking…")
+        val past = history.toList()
+        Thread {
+            var ok = false
+            val ans = try {
+                val msgs = JSONArray()
+                for ((role, t) in past) msgs.put(JSONObject().put("role", role).put("content", t))
+                msgs.put(JSONObject().put("role", "user").put("content", q))
+                val body = JSONObject().put("model", MODEL).put("max_tokens", 500)
+                    .put("system", SYSTEM).put("messages", msgs)
+                val conn = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 15000; conn.readTimeout = 40000; conn.doOutput = true
+                conn.setRequestProperty("content-type", "application/json")
+                conn.setRequestProperty("x-api-key", key)
+                conn.setRequestProperty("anthropic-version", "2023-06-01")
+                conn.outputStream.use { it.write(body.toString().toByteArray()) }
+                val code = conn.responseCode
+                val text = (if (code in 200..299) conn.inputStream else conn.errorStream).bufferedReader().use { it.readText() }
+                when {
+                    code == 401 -> "Your AI key doesn't look right, boss. Please check it in my settings."
+                    code == 429 -> "I'm being rate limited right now, boss. Try again in a moment."
+                    code !in 200..299 -> "My AI brain returned an error, boss."
+                    else -> {
+                        val arr = JSONObject(text).getJSONArray("content")
+                        val sb = StringBuilder()
+                        for (i in 0 until arr.length()) {
+                            val b = arr.getJSONObject(i)
+                            if (b.optString("type") == "text") sb.append(b.optString("text"))
+                        }
+                        ok = sb.isNotBlank()
+                        if (ok) sb.toString().trim() else "I don't have an answer for that, boss."
+                    }
+                }
+            } catch (e: Exception) {
+                "I couldn't reach my brain, boss. Please check your internet."
+            }
+            handler.post {
+                aiBusy = false
+                if (!running) return@post
+                if (ok) {
+                    history.add("user" to q); history.add("assistant" to ans)
+                    while (history.size > 8) history.removeAt(0)
+                    skills.lastAnswer = ans
+                }
+                reply(ans)
+            }
+        }.start()
+    }
+
     private fun closeApp(name: String) {
         val target = name.trim()
         if (appCache.isEmpty()) loadApps()
@@ -250,6 +326,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     private fun reply(text: String) {
         updateNotif(text)
+        onReply?.invoke(text)
         if (!prefs().getBoolean("voice_on", true) || !ttsReady) return
         speaking = true
         handler.removeCallbacks(startRunnable)
