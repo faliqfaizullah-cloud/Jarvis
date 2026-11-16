@@ -12,6 +12,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.speech.tts.TextToSpeech
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -31,6 +32,9 @@ class MainActivity : Activity() {
     private lateinit var orb: OrbView
     private lateinit var wave: WaveView
     private lateinit var input: EditText
+    private var previewTts: TextToSpeech? = null
+    private var previewReady = false
+    private var variantTts: TextToSpeech? = null
     private lateinit var greetingView: TextView
     private lateinit var headlineView: TextView
     private lateinit var answerCard: LinearLayout
@@ -206,6 +210,7 @@ class MainActivity : Activity() {
         JarvisService.onReply = { t: String -> showAnswer(t) }
     }
     override fun onPause() { JarvisService.onReply = null; orb.stop(); wave.stop(); super.onPause() }
+    override fun onDestroy() { previewTts?.shutdown(); variantTts?.shutdown(); super.onDestroy() }
 
     // ---- settings sheet ----
     private fun showSettings() {
@@ -228,6 +233,7 @@ class MainActivity : Activity() {
         panel.addView(switchRow("Jarvis voice replies", prefs().getBoolean("voice_on", true)) {
             prefs().edit().putBoolean("voice_on", it).apply()
         })
+        panel.addView(glassButton("Voice pack: " + VoicePacks.get(prefs().getInt("voice_pack", 0)).name) { d.dismiss(); showVoicePacks() })
         panel.addView(glassButton("Set AI key (Claude)") { showKeyDialog() })
         panel.addView(glassButton("Allow contacts (call & text)") {
             requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), 2)
@@ -249,6 +255,65 @@ class MainActivity : Activity() {
         d.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         d.window?.setLayout((resources.displayMetrics.widthPixels * 0.9f).toInt(), WRAP)
         d.show()
+    }
+
+    // ---- voice packs ----
+    private fun showVoicePacks() {
+        previewReady = false
+        previewTts?.shutdown()
+        previewTts = TextToSpeech(this) { st -> previewReady = (st == TextToSpeech.SUCCESS) }
+        val sel = prefs().getInt("voice_pack", 0).coerceIn(0, VoicePacks.all.size - 1)
+        val names = VoicePacks.all.map { it.name + " - " + it.desc }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Voice pack")
+            .setSingleChoiceItems(names, sel) { _, which ->
+                prefs().edit().putInt("voice_pack", which).putString("voice_name", "").apply()
+                val t = previewTts
+                if (previewReady && t != null) VoicePacks.preview(t, VoicePacks.all[which], "")
+            }
+            .setNeutralButton("Voices…") { _, _ -> showVariants() }
+            .setPositiveButton("Done", null)
+            .setOnDismissListener { previewTts?.shutdown(); previewTts = null }
+            .show()
+    }
+
+    private fun showVariants() {
+        variantTts?.shutdown()
+        variantTts = TextToSpeech(this) { st ->
+            runOnUiThread {
+                val t = variantTts
+                if (st != TextToSpeech.SUCCESS || t == null) {
+                    Toast.makeText(this, "Text-to-speech isn't available", Toast.LENGTH_LONG).show()
+                } else presentVariants(t)
+            }
+        }
+    }
+
+    private fun openTtsSettings() {
+        try { startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
+        catch (e: Exception) { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+    }
+
+    private fun presentVariants(t: TextToSpeech) {
+        val pack = VoicePacks.get(prefs().getInt("voice_pack", 0))
+        val voices = VoicePacks.voicesFor(t, pack.locale)
+        val b = AlertDialog.Builder(this)
+            .setNeutralButton("Get more voices") { _, _ -> openTtsSettings() }
+            .setPositiveButton("Done", null)
+            .setOnDismissListener { variantTts?.shutdown(); variantTts = null }
+        if (voices.isEmpty()) {
+            b.setTitle(pack.name + " voices")
+                .setMessage("No extra " + pack.locale.displayName + " voices are installed yet. Tap Get more voices, open your speech engine and install voice data.")
+        } else {
+            val labels = voices.mapIndexed { i, v -> "Voice " + (i + 1) + (if (v.isNetworkConnectionRequired) " (online)" else "") }.toTypedArray()
+            val cur = voices.indexOfFirst { it.name == prefs().getString("voice_name", "") }.coerceAtLeast(0)
+            b.setTitle(pack.name + " voices")
+                .setSingleChoiceItems(labels, cur) { _, w ->
+                    prefs().edit().putString("voice_name", voices[w].name).apply()
+                    VoicePacks.preview(t, pack, voices[w].name)
+                }
+        }
+        b.show()
     }
 
     private fun showKeyDialog() {
@@ -284,6 +349,7 @@ class MainActivity : Activity() {
                 "• navigate to the airport\n" +
                 "• play lofi music\n" +
                 "• flashlight on / volume up\n" +
+                "• change voice to Friday / next voice\n" +
                 "• battery level / weather\n" +
                 "• what is 15 percent of 240\n" +
                 "• good morning (daily briefing)\n" +

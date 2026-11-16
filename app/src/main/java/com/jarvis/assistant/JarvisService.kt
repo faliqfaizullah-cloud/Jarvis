@@ -41,6 +41,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private lateinit var overlay: OrbOverlay
     private val history = ArrayList<Pair<String, String>>()
     private var aiBusy = false
+    private var appliedVoiceKey = ""
 
     private val handler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
@@ -91,9 +92,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            tts?.language = Locale.US
-            tts?.setPitch(0.75f)
-            tts?.setSpeechRate(0.95f)
+            applyVoice()
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(id: String?) {}
                 override fun onError(id: String?) { speaking = false; listen(100) }
@@ -142,6 +141,32 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (t == lastNotif) return
         lastNotif = t
         getSystemService(NotificationManager::class.java).notify(1, notif(t))
+    }
+
+    // ---------- Voice packs ----------
+    private fun applyVoice() {
+        val t = tts ?: return
+        val pack = VoicePacks.get(prefs().getInt("voice_pack", 0))
+        val vn = prefs().getString("voice_name", "") ?: ""
+        val key = pack.name + "|" + vn
+        if (key == appliedVoiceKey) return
+        VoicePacks.apply(t, pack, vn)
+        appliedVoiceKey = key
+    }
+
+    private fun setPack(i: Int) { prefs().edit().putInt("voice_pack", i).putString("voice_name", "").apply() }
+
+    private fun voiceCommand(cmd: String): String? {
+        if (cmd == "next voice" || cmd == "change voice" || cmd == "change your voice") {
+            val i = (prefs().getInt("voice_pack", 0) + 1) % VoicePacks.all.size
+            setPack(i); return "Voice changed to ${VoicePacks.get(i).name}, boss."
+        }
+        val m = Regex("^(?:(?:change|switch|set)(?: your| the)? voice(?: to)? (.+)|use (?:the )?(.+) voice)$").matchEntire(cmd)
+            ?: return null
+        val want = m.groupValues[1].ifEmpty { m.groupValues[2] }.trim().removeSuffix(" voice")
+        val i = VoicePacks.all.indexOfFirst { want.contains(it.name.lowercase()) || it.name.lowercase().contains(want) }
+        if (i < 0) return "I don't know a voice called $want, boss. Try " + VoicePacks.all.joinToString(", ") { it.name } + "."
+        setPack(i); return "Voice changed to ${VoicePacks.get(i).name}, boss."
     }
 
     // Normal (heads-up, with sound) notification for each reply. Skipped while the app is on screen.
@@ -231,6 +256,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             awaitingUntil = SystemClock.elapsedRealtime() + 8000
             reply("Yes boss, I'm listening."); return
         }
+        voiceCommand(cmd)?.let { reply(it); return }
         skills.tryHandle(cmd)?.let { reply(it); return }
         val open = openRegex.find(cmd)
         val close = closeRegex.find(cmd)
@@ -367,6 +393,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         speaking = true
         handler.removeCallbacks(startRunnable)
         recognizer?.cancel()
+        applyVoice()
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_reply")
     }
 
