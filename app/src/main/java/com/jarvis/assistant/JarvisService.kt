@@ -87,7 +87,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_COMMAND) {
-            val t = intent.getStringExtra("text")?.lowercase(Locale.getDefault())?.trim().orEmpty()
+            val t = intent?.getStringExtra("text")?.lowercase(Locale.getDefault())?.trim().orEmpty()
                 .replace(Regex("^(hey\\s+)?jarvis[,\\s]*"), "")
             if (running && t.isNotEmpty()) { updateNotif("Typed: $t"); process(t) }
             return START_STICKY
@@ -130,12 +130,10 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun ensureRecognizer(): SpeechRecognizer {
-        var r = recognizer
-        if (r == null) {
-            r = SpeechRecognizer.createSpeechRecognizer(this)
-            r.setRecognitionListener(listener)
-            recognizer = r
-        }
+        recognizer?.let { return it }
+        val r: SpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        r.setRecognitionListener(listener)
+        recognizer = r
         return r
     }
 
