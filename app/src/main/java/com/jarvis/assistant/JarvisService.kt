@@ -21,7 +21,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class JarvisService : Service(), TextToSpeech.OnInitListener {
-    companion object { const val ACTION_STOP = "com.jarvis.assistant.STOP"; const val CH = "jarvis" }
+    companion object { const val ACTION_STOP = "com.jarvis.assistant.STOP"; const val ACTION_COMMAND = "com.jarvis.assistant.COMMAND"; const val CH = "jarvis" }
 
     private val handler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
@@ -34,6 +34,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private val wakeRegex = Regex("^(hey|hi|ok|okay)\\s+")
     private val openRegex = Regex("^(please\\s+)?(open|launch|start)\\s+(.+?)(\\s+please)?$")
     private val nonAlnum = Regex("[^a-z0-9]")
+    private val closeRegex = Regex("^(please\\s+)?(close|quit|exit|kill)(\\s+(.+?))?(\\s+please)?$")
+    private val itRegex = Regex("^(it|this|that|this app|that app|the app|app|current app|the current app)$")
+    private var lastOpened: String? = null
 
     // Cached app list: normalized label -> package (rebuilt every 5 min or on a miss)
     @Volatile private var appCache: List<Pair<String, String>> = emptyList()
@@ -82,6 +85,12 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_COMMAND) {
+            val t = intent.getStringExtra("text")?.lowercase(Locale.getDefault())?.trim().orEmpty()
+                .replace(Regex("^(hey\\s+)?jarvis[,\\s]*"), "")
+            if (running && t.isNotEmpty()) { updateNotif("Typed: $t"); process(t) }
+            return START_STICKY
         }
         ServiceCompat.startForeground(this, 1, notif("Listening for \"Hey Jarvis\"…"),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
@@ -167,20 +176,25 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             .trim()
         awaitingUntil = 0
         updateNotif("Heard: $raw")
+        process(cmd)
+    }
 
+    private fun process(cmd: String) {
         if (cmd.isEmpty()) {
             awaitingUntil = SystemClock.elapsedRealtime() + 8000
             reply("Yes boss, I'm listening."); return
         }
         val open = openRegex.find(cmd)
+        val close = closeRegex.find(cmd)
         when {
             open != null -> openApp(open.groupValues[3])
+            close != null -> closeApp(close.groupValues[4].ifEmpty { "it" })
             cmd.contains("time") -> reply("It's " + SimpleDateFormat("h:mm a", Locale.US).format(Date()) + ", boss.")
             cmd.contains("date") || cmd.contains("day is it") ->
                 reply("Today is " + SimpleDateFormat("EEEE, MMMM d", Locale.US).format(Date()) + ", boss.")
             cmd.contains("how are you") -> reply("Fully operational and ready to work, boss.")
             cmd.contains("thank") -> reply("Anytime, boss.")
-            else -> reply("Sorry boss, I can't do that yet. Try saying open and an app name.")
+            else -> reply("Sorry boss, I can't do that yet. Try saying open or close and an app name.")
         }
     }
 
@@ -211,11 +225,29 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         try {
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(launch)
+            lastOpened = pkg
             reply(listOf("Alright boss, I opened it up for you.",
                 "Done, boss. It's open.", "Right away, boss. Opening it now.").random())
         } catch (e: Exception) {
             reply("I couldn't open it, boss. Please allow display over other apps in my settings.")
         }
+    }
+
+    private fun closeApp(name: String) {
+        val target = name.trim()
+        if (appCache.isEmpty()) loadApps()
+        val pkg = if (itRegex.matches(target)) lastOpened else findPackage(norm(target))
+        if (pkg == null) { reply("Sorry boss, which app should I close?"); return }
+        if (pkg == packageName) { reply("I can't close myself, boss. Use the wave button to stop me."); return }
+        // Android only lets apps kill background processes, so go Home first, then kill.
+        try {
+            startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) { }
+        val am = getSystemService(ActivityManager::class.java)
+        handler.postDelayed({ try { am.killBackgroundProcesses(pkg) } catch (e: Exception) { } }, 700)
+        handler.postDelayed({ try { am.killBackgroundProcesses(pkg) } catch (e: Exception) { } }, 2000)
+        if (pkg == lastOpened) lastOpened = null
+        reply(listOf("Alright boss, I closed it.", "Done, boss. It's closed.", "Right away, boss. Closing it now.").random())
     }
 
     private fun reply(text: String) {
