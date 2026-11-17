@@ -24,6 +24,8 @@ import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.*
+import android.os.Handler
+import android.os.Looper
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -78,6 +80,7 @@ class MainActivity : Activity() {
         // ---- orb + greeting + headline ----
         content.addView(Space(ctx), LinearLayout.LayoutParams(0, 0, 0.8f))
         orb = OrbView(ctx)
+        orb.setOnClickListener { setJarvis(!isOn()) }
         content.addView(orb, LinearLayout.LayoutParams(dp(260), dp(260)))
         greetingView = TextView(ctx).apply {
             text = "Hello boss"; textSize = 16f; setTextColor(col("#A9B4C8")); gravity = Gravity.CENTER
@@ -108,6 +111,23 @@ class MainActivity : Activity() {
         }
         content.addView(answerCard, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(dp(24), dp(10), dp(24), dp(6)) })
         content.addView(Space(ctx), LinearLayout.LayoutParams(0, 0, 1.3f))
+
+        // ---- quick-action chips (tap to run) ----
+        val chips = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(20), 0, dp(12), 0) }
+        listOf("🔋 Battery" to "battery level", "⏰ 5 min timer" to "set a timer for 5 minutes",
+            "📝 Notes" to "read my notes", "☀️ Weather" to "weather", "🌅 Briefing" to "good morning",
+            "🔦 Flashlight" to "flashlight").forEach { (label, cmd) ->
+            chips.addView(TextView(ctx).apply {
+                text = label; textSize = 14f; setTextColor(Color.WHITE)
+                setPadding(dp(16), dp(9), dp(16), dp(9))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(20).toFloat(); setColor(col("#26FFFFFF")); setStroke(dp(1), col("#44FFFFFF"))
+                }
+                setOnClickListener { sendTyped(cmd) }
+            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginEnd = dp(8) })
+        }
+        content.addView(HorizontalScrollView(ctx).apply { isHorizontalScrollBarEnabled = false; addView(chips) },
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(2) })
 
         // ---- glowing glass "Ask anything..." pill ----
         val box = GlowBox(ctx, dp(22), dp(30).toFloat(), col("#663A8CFF"))
@@ -151,7 +171,17 @@ class MainActivity : Activity() {
         ViewCompat.requestApplyInsets(root)
     }
 
+    private val ui = Handler(Looper.getMainLooper())
+    private val resetGreeting = Runnable { greetingView.text = "Hello boss" }
+
+    private fun showHeard(t: String) {
+        if (answerCard.visibility == View.VISIBLE) return
+        greetingView.text = "“" + t.trim() + "”"
+        ui.removeCallbacks(resetGreeting); ui.postDelayed(resetGreeting, 4000)
+    }
+
     private fun showAnswer(t: String) {
+        orb.setSpinDuration(if (t == "Thinking…") 2500 else 9000)
         answerText.text = t
         answerCard.visibility = View.VISIBLE
         greetingView.visibility = View.GONE
@@ -159,6 +189,7 @@ class MainActivity : Activity() {
     }
 
     private fun hideAnswer() {
+        greetingView.text = "Hello boss"
         answerCard.visibility = View.GONE
         greetingView.visibility = View.VISIBLE
         headlineView.visibility = View.VISIBLE
@@ -208,8 +239,10 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume(); orb.start(); wave.start(); refresh()
         JarvisService.onReply = { t: String -> showAnswer(t) }
+        JarvisService.onHeard = { t: String -> showHeard(t) }
+        JarvisService.onLevel = { v: Float -> orb.pushLevel(v) }
     }
-    override fun onPause() { JarvisService.onReply = null; orb.stop(); wave.stop(); super.onPause() }
+    override fun onPause() { JarvisService.onReply = null; JarvisService.onHeard = null; JarvisService.onLevel = null; orb.stop(); wave.stop(); super.onPause() }
     override fun onDestroy() { previewTts?.shutdown(); variantTts?.shutdown(); super.onDestroy() }
 
     // ---- settings sheet ----

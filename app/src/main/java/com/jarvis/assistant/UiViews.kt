@@ -42,6 +42,7 @@ class OrbView(c: Context) : View(c) {
     var glossy = false
     private val glossBody = Paint(Paint.ANTI_ALIAS_FLAG)
     private val glossShine = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var lv = 0f
     private var angle = 0f
     private var cx = 0f
     private var cy = 0f
@@ -65,6 +66,8 @@ class OrbView(c: Context) : View(c) {
     fun start() { if (!anim.isRunning) anim.start() }
     fun stop() { anim.cancel() }
     fun setSpinDuration(ms: Long) { anim.duration = ms }
+    /** Mic loudness 0..1: makes the orb swell while you speak. */
+    fun pushLevel(v: Float) { lv = maxOf(lv * 0.6f, v) }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         cx = w / 2f; cy = h / 2f; r = min(w, h) * 0.26f
@@ -92,7 +95,8 @@ class OrbView(c: Context) : View(c) {
     }
 
     override fun onDraw(canvas: Canvas) {
-        val s = if (active) 1f + 0.03f * sin(Math.toRadians((angle * 2f).toDouble())).toFloat() else 1f
+        lv *= 0.9f
+        val s = if (active) 1f + 0.03f * sin(Math.toRadians((angle * 2f).toDouble())).toFloat() + lv * 0.08f else 1f
         canvas.save()
         canvas.scale(s, s, cx, cy)
         glowPaint.alpha = if (active) 255 else 130

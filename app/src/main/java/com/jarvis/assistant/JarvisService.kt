@@ -11,6 +11,8 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -24,6 +26,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.atomic.AtomicInteger
 
 class JarvisService : Service(), TextToSpeech.OnInitListener {
     companion object {
@@ -36,12 +39,19 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             "Address the user as boss. Answer in at most three short sentences unless asked to draft or write something, " +
             "then keep it under 150 words. Plain speakable text only: no markdown, no bullet symbols, no emojis."
         @Volatile var onReply: ((String) -> Unit)? = null
+        @Volatile var onHeard: ((String) -> Unit)? = null
+        @Volatile var onLevel: ((Float) -> Unit)? = null
     }
     private lateinit var skills: Skills
     private lateinit var overlay: OrbOverlay
     private val history = ArrayList<Pair<String, String>>()
     private var aiBusy = false
     private var appliedVoiceKey = ""
+    private val pending = AtomicInteger(0)
+    @Volatile private var streamActive = false
+    private var pendingPartial: Runnable? = null
+    @Volatile private var preferOffline = true
+    private var uttCounter = 0
 
     private val handler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
@@ -62,14 +72,13 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     @Volatile private var appCache: List<Pair<String, String>> = emptyList()
     @Volatile private var cacheTime = 0L
 
-    private val recIntent by lazy {
-        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
-        }
+    private fun recIntent() = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 650L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 450L)
+        if (preferOffline) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
     }
 
     private fun prefs() = getSharedPreferences("jarvis", Context.MODE_PRIVATE)
@@ -95,8 +104,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             applyVoice()
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(id: String?) {}
-                override fun onError(id: String?) { speaking = false; listen(100) }
-                override fun onDone(id: String?) { speaking = false; listen(100) }
+                override fun onError(id: String?) { finishUtterance() }
+                override fun onDone(id: String?) { finishUtterance() }
             })
             ttsReady = true
         }
@@ -195,7 +204,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private val startRunnable = Runnable {
         if (!running || speaking) return@Runnable
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return@Runnable
-        try { ensureRecognizer().startListening(recIntent) } catch (e: Exception) { resetRecognizer(); listen(1000) }
+        try { ensureRecognizer().startListening(recIntent()) } catch (e: Exception) { resetRecognizer(); listen(1000) }
     }
 
     private fun listen(delay: Long = 150) {
@@ -215,25 +224,41 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     private val listener = object : RecognitionListener {
         override fun onResults(results: Bundle?) {
+            pendingPartial?.let { handler.removeCallbacks(it) }; pendingPartial = null
             val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: arrayListOf()
             val heard = list.firstOrNull { it.contains("jarvis", true) } ?: list.firstOrNull()
             if (heard != null) handle(heard)
-            if (!speaking) listen(100)
+            if (!speaking) listen(50)
         }
         override fun onError(error: Int) {
+            pendingPartial?.let { handler.removeCallbacks(it) }; pendingPartial = null
             when (error) {
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> return
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> listen(100)
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> { resetRecognizer(); listen(1500) }
-                else -> { resetRecognizer(); listen(800) }
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> listen(50)
+                12, 13 -> { preferOffline = false; resetRecognizer(); listen(200) }   // offline language unavailable
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> { resetRecognizer(); listen(1200) }
+                else -> { resetRecognizer(); listen(600) }
             }
         }
         override fun onReadyForSpeech(p: Bundle?) {}
         override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(r: Float) {}
+        override fun onRmsChanged(r: Float) { onLevel?.invoke(((r + 2f) / 12f).coerceIn(0f, 1f)) }
         override fun onBufferReceived(b: ByteArray?) {}
         override fun onEndOfSpeech() {}
-        override fun onPartialResults(p: Bundle?) {}
+        // Act early: an exact "open <app>" / "close <app>" fires ~0.3s after you stop talking, without waiting for the final result.
+        override fun onPartialResults(p: Bundle?) {
+            val t = p?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return
+            pendingPartial?.let { handler.removeCallbacks(it) }; pendingPartial = null
+            val low = t.lowercase(Locale.getDefault()).trim()
+            val awaiting = SystemClock.elapsedRealtime() < awaitingUntil
+            if (!low.contains("jarvis") && !awaiting) return
+            onHeard?.invoke(t)
+            val cmd = low.substringAfter("jarvis", low).replace(wakeRegex, "").replace(Regex("^[,.\\s]+"), "").trim()
+            if (!isQuickCommand(cmd)) return
+            val r = Runnable { pendingPartial = null; recognizer?.cancel(); handle(t); if (!speaking) listen(50) }
+            pendingPartial = r
+            handler.postDelayed(r, 320)
+        }
         override fun onEvent(t: Int, p: Bundle?) {}
     }
 
@@ -247,6 +272,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             .replace(Regex("^[,.\\s]+"), "")
             .trim()
         awaitingUntil = 0
+        vibrate()
+        onHeard?.invoke(raw)
         updateNotif("Heard: $raw")
         process(cmd)
     }
@@ -269,6 +296,49 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             cmd.startsWith("how are you") -> reply("Fully operational and ready to work, boss.")
             cmd.startsWith("thank") -> reply("Anytime, boss.")
             else -> askAi(cmd)
+        }
+    }
+
+    private fun vibrate() {
+        try {
+            getSystemService(Vibrator::class.java)
+                .vibrate(VibrationEffect.createOneShot(25, VibrationEffect.DEFAULT_AMPLITUDE))
+        } catch (e: Exception) { }
+    }
+
+    // An exact, unambiguous app name: safe to act on before the sentence is finished.
+    private fun findExact(q: String): Boolean =
+        q.isNotEmpty() && appCache.any { it.first == q } && appCache.none { it.first != q && it.first.startsWith(q) }
+
+    private fun isQuickCommand(cmd: String): Boolean {
+        val o = openRegex.find(cmd)
+        if (o != null) return findExact(norm(o.groupValues[3]))
+        val c = closeRegex.find(cmd)
+        if (c != null) { val t = c.groupValues[4].trim(); return t.isNotEmpty() && !itRegex.matches(t) && findExact(norm(t)) }
+        return false
+    }
+
+    private fun finishUtterance() {
+        if (pending.decrementAndGet() <= 0) {
+            pending.set(0)
+            if (!streamActive) { speaking = false; listen(60) }
+        }
+    }
+
+    // Speak one chunk; the first flushes, the rest queue behind it (used while an AI answer streams in).
+    private fun speakChunk(chunk: String) {
+        if (!prefs().getBoolean("voice_on", true) || !ttsReady || chunk.isBlank()) return
+        applyVoice()
+        uttCounter++
+        if (!speaking) {
+            speaking = true
+            handler.removeCallbacks(startRunnable)
+            recognizer?.cancel()
+            pending.set(1)
+            tts?.speak(chunk, TextToSpeech.QUEUE_FLUSH, null, "ai$uttCounter")
+        } else {
+            pending.incrementAndGet()
+            tts?.speak(chunk, TextToSpeech.QUEUE_ADD, null, "ai$uttCounter")
         }
     }
 
@@ -297,21 +367,23 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         val launch = pkg?.let { packageManager.getLaunchIntentForPackage(it) }
         if (launch == null) { reply("Sorry boss, I couldn't find $name on your phone."); return }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val phrases = listOf("Alright boss, I opened it up for you.",
-            "Done, boss. It's open.", "Right away, boss. Opening it now.")
-        // Glossy glowing sphere animation, then the app opens at its peak.
+        val target = pkg
+        // Speak right away while the frosted-orb animation plays; the app opens at its peak.
+        reply(listOf("Alright boss, I opened it up for you.",
+            "Done, boss. It's open.", "Right away, boss. Opening it now.").random())
         overlay.play {
             try {
                 startActivity(launch)
-                lastOpened = pkg
-                reply(phrases.random())
+                lastOpened = target
             } catch (e: Exception) {
                 reply("I couldn't open it, boss. Please allow display over other apps in my settings.")
             }
         }
     }
 
-    // ---------- AI brain (Claude API) ----------
+    // ---------- AI brain (Claude API, streamed: starts speaking after the first sentence) ----------
+    private val sentenceRegex = Regex("^(.{15,}?[.!?])\\s", RegexOption.DOT_MATCHES_ALL)
+
     private fun askAi(q: String) {
         val key = prefs().getString("api_key", "")?.trim().orEmpty()
         if (key.isEmpty()) {
@@ -319,52 +391,75 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }
         if (aiBusy) { reply("One moment, boss. I'm still thinking."); return }
         aiBusy = true
+        streamActive = true
         updateNotif("Thinking…"); onReply?.invoke("Thinking…")
         val past = history.toList()
         Thread {
-            var ok = false
-            val ans = try {
+            val sb = StringBuilder()
+            val unspoken = StringBuilder()
+            var err: String? = null
+            try {
                 val msgs = JSONArray()
                 for ((role, t) in past) msgs.put(JSONObject().put("role", role).put("content", t))
                 msgs.put(JSONObject().put("role", "user").put("content", q))
-                val body = JSONObject().put("model", MODEL).put("max_tokens", 500)
+                val body = JSONObject().put("model", MODEL).put("max_tokens", 350).put("stream", true)
                     .put("system", SYSTEM).put("messages", msgs)
                 val conn = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
-                conn.connectTimeout = 15000; conn.readTimeout = 40000; conn.doOutput = true
+                conn.connectTimeout = 10000; conn.readTimeout = 40000; conn.doOutput = true
                 conn.setRequestProperty("content-type", "application/json")
                 conn.setRequestProperty("x-api-key", key)
                 conn.setRequestProperty("anthropic-version", "2023-06-01")
                 conn.outputStream.use { it.write(body.toString().toByteArray()) }
                 val code = conn.responseCode
-                val text = (if (code in 200..299) conn.inputStream else conn.errorStream).bufferedReader().use { it.readText() }
-                when {
-                    code == 401 -> "Your AI key doesn't look right, boss. Please check it in my settings."
-                    code == 429 -> "I'm being rate limited right now, boss. Try again in a moment."
-                    code !in 200..299 -> "My AI brain returned an error, boss."
-                    else -> {
-                        val arr = JSONObject(text).getJSONArray("content")
-                        val sb = StringBuilder()
-                        for (i in 0 until arr.length()) {
-                            val b = arr.getJSONObject(i)
-                            if (b.optString("type") == "text") sb.append(b.optString("text"))
+                if (code !in 200..299) {
+                    err = when (code) {
+                        401 -> "Your AI key doesn't look right, boss. Please check it in my settings."
+                        429 -> "I'm being rate limited right now, boss. Try again in a moment."
+                        else -> "My AI brain returned an error, boss."
+                    }
+                } else {
+                    conn.inputStream.bufferedReader().use { rd ->
+                        while (true) {
+                            val line = rd.readLine() ?: break
+                            if (!line.startsWith("data:")) continue
+                            val j = try { JSONObject(line.substring(5).trim()) } catch (e: Exception) { continue }
+                            if (j.optString("type") != "content_block_delta") continue
+                            val tx = j.optJSONObject("delta")?.optString("text").orEmpty()
+                            if (tx.isEmpty()) continue
+                            sb.append(tx); unspoken.append(tx)
+                            val snap = sb.toString()
+                            handler.post { if (running) onReply?.invoke(snap) }
+                            var mm = sentenceRegex.find(unspoken)
+                            while (mm != null) {
+                                val chunk = mm.groupValues[1]
+                                unspoken.delete(0, mm.range.last + 1)
+                                handler.post { if (running) speakChunk(chunk) }
+                                mm = sentenceRegex.find(unspoken)
+                            }
                         }
-                        ok = sb.isNotBlank()
-                        if (ok) sb.toString().trim() else "I don't have an answer for that, boss."
                     }
                 }
             } catch (e: Exception) {
-                "I couldn't reach my brain, boss. Please check your internet."
+                if (sb.isEmpty()) err = "I couldn't reach my brain, boss. Please check your internet."
             }
+            val full = sb.toString().trim()
+            val rest = unspoken.toString().trim()
+            val e = err
             handler.post {
                 aiBusy = false
+                streamActive = false
                 if (!running) return@post
-                if (ok) {
-                    history.add("user" to q); history.add("assistant" to ans)
-                    while (history.size > 8) history.removeAt(0)
-                    skills.lastAnswer = ans
+                if (full.isEmpty()) {
+                    reply(e ?: "I don't have an answer for that, boss."); return@post
                 }
-                reply(ans)
+                history.add("user" to q); history.add("assistant" to full)
+                while (history.size > 8) history.removeAt(0)
+                skills.lastAnswer = full
+                if (rest.isNotEmpty()) speakChunk(rest)
+                onReply?.invoke(full)
+                postReply(full)
+                if (pending.get() <= 0) { speaking = false; listen(50) }
             }
         }.start()
     }
@@ -393,6 +488,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         speaking = true
         handler.removeCallbacks(startRunnable)
         recognizer?.cancel()
+        pending.set(1)
         applyVoice()
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_reply")
     }
