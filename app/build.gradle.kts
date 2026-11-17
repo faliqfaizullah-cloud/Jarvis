@@ -2,6 +2,11 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// The release workflow passes the version from the git tag (v1.8.0 -> 1.8.0) and an ever-increasing build number.
+val appVersionName = (project.findProperty("appVersionName") as String?) ?: "1.7.0"
+val appVersionCode = ((project.findProperty("appVersionCode") as String?) ?: "110").toInt()
+
 android {
     namespace = "com.jarvis.assistant"
     compileSdk = 34
@@ -9,15 +14,24 @@ android {
         applicationId = "com.jarvis.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.6.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
+    }
+    // One fixed signing key for every build, so new versions install over the old one (no uninstall needed).
+    signingConfigs {
+        create("jarvis") {
+            storeFile = file("jarvis.keystore")
+            storePassword = "jarvis-release"
+            keyAlias = "jarvis"
+            keyPassword = "jarvis-release"
+        }
     }
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("jarvis")
         }
     }
     lint { checkReleaseBuilds = false; abortOnError = false }

@@ -283,6 +283,14 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             awaitingUntil = SystemClock.elapsedRealtime() + 8000
             reply("Yes boss, I'm listening."); return
         }
+        if (Regex("^(check for updates?|check for an update|update (yourself|jarvis|the app)|any updates?)$").matches(cmd)) {
+            reply("Checking for updates, boss.")
+            try {
+                startActivity(Intent(this, MainActivity::class.java).putExtra("check_update", true)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+            } catch (e: Exception) { }
+            return
+        }
         voiceCommand(cmd)?.let { reply(it); return }
         skills.tryHandle(cmd)?.let { reply(it); return }
         val open = openRegex.find(cmd)
@@ -299,12 +307,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun vibrate() {
-        try {
-            getSystemService(Vibrator::class.java)
-                .vibrate(VibrationEffect.createOneShot(25, VibrationEffect.DEFAULT_AMPLITUDE))
-        } catch (e: Exception) { }
-    }
+    private fun vibrate() { Haptics.click(this) }
 
     // An exact, unambiguous app name: safe to act on before the sentence is finished.
     private fun findExact(q: String): Boolean =
@@ -373,6 +376,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             "Done, boss. It's open.", "Right away, boss. Opening it now.").random())
         overlay.play {
             try {
+                Haptics.heavy(this)
                 startActivity(launch)
                 lastOpened = target
             } catch (e: Exception) {
@@ -451,12 +455,14 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                 streamActive = false
                 if (!running) return@post
                 if (full.isEmpty()) {
+                    Haptics.error(this)
                     reply(e ?: "I don't have an answer for that, boss."); return@post
                 }
                 history.add("user" to q); history.add("assistant" to full)
                 while (history.size > 8) history.removeAt(0)
                 skills.lastAnswer = full
                 if (rest.isNotEmpty()) speakChunk(rest)
+                Haptics.confirm(this)
                 onReply?.invoke(full)
                 postReply(full)
                 if (pending.get() <= 0) { speaking = false; listen(50) }

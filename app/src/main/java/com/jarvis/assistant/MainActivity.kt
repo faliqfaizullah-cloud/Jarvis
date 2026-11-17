@@ -72,7 +72,7 @@ class MainActivity : Activity() {
                 setColor(col("#33FFFFFF")); setStroke(dp(1), col("#55FFFFFF"))
             }
             addView(SlidersView(ctx), FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
-            setOnClickListener { showSettings() }
+            setOnClickListener { Haptics.tick(ctx); showSettings() }
         }
         gear.addView(gearBtn, FrameLayout.LayoutParams(dp(40), dp(40)))
         bar.addView(gear, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.END or Gravity.CENTER_VERTICAL).apply { marginEnd = dp(10) })
@@ -80,7 +80,7 @@ class MainActivity : Activity() {
         // ---- orb + greeting + headline ----
         content.addView(Space(ctx), LinearLayout.LayoutParams(0, 0, 0.8f))
         orb = OrbView(ctx)
-        orb.setOnClickListener { setJarvis(!isOn()) }
+        orb.setOnClickListener { Haptics.heavy(ctx); setJarvis(!isOn()) }
         content.addView(orb, LinearLayout.LayoutParams(dp(260), dp(260)))
         greetingView = TextView(ctx).apply {
             text = "Hello boss"; textSize = 16f; setTextColor(col("#A9B4C8")); gravity = Gravity.CENTER
@@ -107,7 +107,7 @@ class MainActivity : Activity() {
                 cornerRadius = dp(26).toFloat(); setStroke(dp(1), col("#55FFFFFF"))
             }
             addView(answerScroll)
-            setOnClickListener { hideAnswer() }
+            setOnClickListener { Haptics.tick(ctx); hideAnswer() }
         }
         content.addView(answerCard, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(dp(24), dp(10), dp(24), dp(6)) })
         content.addView(Space(ctx), LinearLayout.LayoutParams(0, 0, 1.3f))
@@ -123,7 +123,7 @@ class MainActivity : Activity() {
                 background = GradientDrawable().apply {
                     cornerRadius = dp(20).toFloat(); setColor(col("#26FFFFFF")); setStroke(dp(1), col("#44FFFFFF"))
                 }
-                setOnClickListener { sendTyped(cmd) }
+                setOnClickListener { Haptics.click(ctx); sendTyped(cmd) }
             }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginEnd = dp(8) })
         }
         content.addView(HorizontalScrollView(ctx).apply { isHorizontalScrollBarEnabled = false; addView(chips) },
@@ -156,7 +156,7 @@ class MainActivity : Activity() {
         }
         pill.addView(input, LinearLayout.LayoutParams(0, WRAP, 1f))
         wave = WaveView(ctx)
-        wave.setOnClickListener { setJarvis(!isOn()) }
+        wave.setOnClickListener { Haptics.heavy(ctx); setJarvis(!isOn()) }
         pill.addView(wave, LinearLayout.LayoutParams(dp(30), dp(26)))
         box.addView(pill, FrameLayout.LayoutParams(MATCH, dp(58)))
         content.addView(box, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(4) })
@@ -169,6 +169,17 @@ class MainActivity : Activity() {
         }
         setContentView(root)
         ViewCompat.requestApplyInsets(root)
+        if (intent?.getBooleanExtra("check_update", false) == true) checkForUpdates(true)
+        else if (System.currentTimeMillis() - prefs().getLong("last_update_check", 0L) > 6 * 3600 * 1000L) {
+            prefs().edit().putLong("last_update_check", System.currentTimeMillis()).apply()
+            checkForUpdates(false)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent?.getBooleanExtra("check_update", false) == true) checkForUpdates(true)
     }
 
     private val ui = Handler(Looper.getMainLooper())
@@ -199,6 +210,7 @@ class MainActivity : Activity() {
     private fun sendTyped(t: String) {
         val text = t.trim()
         if (text.isEmpty()) return
+        Haptics.click(this)
         if (!isOn()) { Toast.makeText(this, "Tap the wave to wake Jarvis first", Toast.LENGTH_SHORT).show(); return }
         startService(Intent(this, JarvisService::class.java)
             .setAction(JarvisService.ACTION_COMMAND).putExtra("text", text))
@@ -266,7 +278,12 @@ class MainActivity : Activity() {
         panel.addView(switchRow("Jarvis voice replies", prefs().getBoolean("voice_on", true)) {
             prefs().edit().putBoolean("voice_on", it).apply()
         })
+        panel.addView(switchRow("Haptic feedback", prefs().getBoolean("haptics_on", true)) {
+            prefs().edit().putBoolean("haptics_on", it).apply()
+            if (it) Haptics.click(this)
+        })
         panel.addView(glassButton("Voice pack: " + VoicePacks.get(prefs().getInt("voice_pack", 0)).name) { d.dismiss(); showVoicePacks() })
+        panel.addView(glassButton("Check for updates (v" + Updater.installedVersion(this) + ")") { d.dismiss(); checkForUpdates(true) })
         panel.addView(glassButton("Set AI key (Claude)") { showKeyDialog() })
         panel.addView(glassButton("Allow contacts (call & text)") {
             requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), 2)
@@ -290,6 +307,67 @@ class MainActivity : Activity() {
         d.show()
     }
 
+    // ---- in-app updates ----
+    private fun checkForUpdates(manual: Boolean) {
+        if (manual) Toast.makeText(this, "Checking for updates…", Toast.LENGTH_SHORT).show()
+        Thread {
+            var info: Updater.Info? = null
+            var failed = false
+            try { info = Updater.check(this) } catch (e: Exception) { failed = true }
+            val found = info
+            val bad = failed
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                if (bad) {
+                    if (manual) {
+                        Haptics.error(this)
+                        Toast.makeText(this, "Couldn't check for updates. Check your internet.", Toast.LENGTH_LONG).show()
+                    }
+                } else if (found == null) {
+                    if (manual) Toast.makeText(this, "You're on the latest version (v" + Updater.installedVersion(this) + ")", Toast.LENGTH_LONG).show()
+                } else {
+                    showUpdateDialog(found)
+                }
+            }
+        }.start()
+    }
+
+    private fun showUpdateDialog(info: Updater.Info) {
+        Haptics.confirm(this)
+        AlertDialog.Builder(this)
+            .setTitle("Update available: v" + info.version)
+            .setMessage("You have v" + Updater.installedVersion(this) + ".\n\n" + info.notes +
+                "\n\nJarvis will download the new version and install it over this one. Your settings, notes and AI key are kept.")
+            .setPositiveButton("Update now") { _, _ -> startUpdate(info) }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
+    private fun startUpdate(info: Updater.Info) {
+        if (!Updater.canInstall(this)) {
+            Toast.makeText(this, "Allow “Install unknown apps” for Jarvis, then tap Update again", Toast.LENGTH_LONG).show()
+            Updater.openInstallPermission(this)
+            return
+        }
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("Downloading v" + info.version + "…")
+            .setView(bar).setCancelable(false).show()
+        Thread {
+            try {
+                val f = Updater.download(this, info.apkUrl) { p -> runOnUiThread { bar.progress = p } }
+                runOnUiThread { dlg.dismiss(); Haptics.heavy(this); Updater.install(this, f) }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    dlg.dismiss(); Haptics.error(this)
+                    Toast.makeText(this, "Download failed. Please try again.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
     // ---- voice packs ----
     private fun showVoicePacks() {
         previewReady = false
@@ -300,6 +378,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Voice pack")
             .setSingleChoiceItems(names, sel) { _, which ->
+                Haptics.tick(this)
                 prefs().edit().putInt("voice_pack", which).putString("voice_name", "").apply()
                 val t = previewTts
                 if (previewReady && t != null) VoicePacks.preview(t, VoicePacks.all[which], "")
@@ -383,6 +462,7 @@ class MainActivity : Activity() {
                 "• play lofi music\n" +
                 "• flashlight on / volume up\n" +
                 "• change voice to Friday / next voice\n" +
+                "• check for updates\n" +
                 "• battery level / weather\n" +
                 "• what is 15 percent of 240\n" +
                 "• good morning (daily briefing)\n" +
@@ -397,7 +477,7 @@ class MainActivity : Activity() {
             text = label; setTextColor(Color.WHITE); textSize = 16f
             isChecked = checked
             setPadding(0, dp(14), 0, dp(6))
-            setOnCheckedChangeListener { _, on -> onChange(on) }
+            setOnCheckedChangeListener { _, on -> Haptics.tick(context); onChange(on) }
         }
 
     private fun glassButton(label: String, onClick: () -> Unit): TextView =
@@ -408,6 +488,6 @@ class MainActivity : Activity() {
                 cornerRadius = dp(22).toFloat(); setColor(col("#33FFFFFF")); setStroke(dp(1), col("#44FFFFFF"))
             }
             layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) }
-            setOnClickListener { onClick() }
+            setOnClickListener { Haptics.tick(context); onClick() }
         }
 }
