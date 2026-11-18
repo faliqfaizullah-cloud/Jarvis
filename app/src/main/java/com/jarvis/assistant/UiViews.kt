@@ -40,6 +40,7 @@ class OrbView(c: Context) : View(c) {
         set(v) { field = v; invalidate() }
     /** Glossy bright-blue sphere with a strong highlight (used by the launch animation). */
     var glossy = false
+    var radiusFactor = 0.26f
     private val glossBody = Paint(Paint.ANTI_ALIAS_FLAG)
     private val glossShine = Paint(Paint.ANTI_ALIAS_FLAG)
     private var lv = 0f
@@ -70,7 +71,7 @@ class OrbView(c: Context) : View(c) {
     fun pushLevel(v: Float) { lv = maxOf(lv * 0.6f, v) }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        cx = w / 2f; cy = h / 2f; r = min(w, h) * 0.26f
+        cx = w / 2f; cy = h / 2f; r = min(w, h) * radiusFactor
         glowPaint.shader = RadialGradient(cx, cy, r * 1.9f,
             intArrayOf(col("#7A3A8CFF"), col("#553070E8"), col("#00000000")),
             floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP)

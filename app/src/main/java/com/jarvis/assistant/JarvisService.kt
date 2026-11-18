@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -41,9 +42,15 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         @Volatile var onReply: ((String) -> Unit)? = null
         @Volatile var onHeard: ((String) -> Unit)? = null
         @Volatile var onLevel: ((Float) -> Unit)? = null
+        @Volatile var onOverlayReply: ((String) -> Unit)? = null
+        @Volatile var onCall: ((Boolean) -> Unit)? = null
+        @Volatile var inCallNow = false
     }
     private lateinit var skills: Skills
     private lateinit var overlay: OrbOverlay
+    private lateinit var bubble: CallBubble
+    private val audio by lazy { getSystemService(AudioManager::class.java) }
+    @Volatile private var inCall = false
     private val history = ArrayList<Pair<String, String>>()
     private var aiBusy = false
     private var appliedVoiceKey = ""
@@ -88,6 +95,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         super.onCreate()
         skills = Skills(this)
         overlay = OrbOverlay(this)
+        bubble = CallBubble(this) { runTyped(it) }
+        onOverlayReply = { t -> bubble.showReply(t) }
         getSystemService(NotificationManager::class.java)
             .createNotificationChannel(NotificationChannel(CH, "Jarvis", NotificationManager.IMPORTANCE_LOW))
         getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -115,6 +124,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (intent?.action == ACTION_STOP) {
             running = false
             overlay.cancel()
+            bubble.hide()
             handler.removeCallbacksAndMessages(null)
             resetRecognizer()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -122,14 +132,13 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_COMMAND) {
-            val t = intent?.getStringExtra("text")?.lowercase(Locale.getDefault())?.trim().orEmpty()
-                .replace(Regex("^(hey\\s+)?jarvis[,\\s]*"), "")
-            if (running && t.isNotEmpty()) { updateNotif("Typed: $t"); process(t) }
+            runTyped(intent.getStringExtra("text").orEmpty())
             return START_STICKY
         }
         ServiceCompat.startForeground(this, 1, notif("Listening for \"Hey Jarvis\"…"),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         if (!running) { running = true; listen(0) }
+        startCallWatch()
         return START_STICKY
     }
 
@@ -202,7 +211,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     // ---------- Listening (single reused recognizer = faster restarts) ----------
     private val startRunnable = Runnable {
-        if (!running || speaking) return@Runnable
+        if (!running || speaking || (inCall && Build.VERSION.SDK_INT < 29)) return@Runnable
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return@Runnable
         try { ensureRecognizer().startListening(recIntent()) } catch (e: Exception) { resetRecognizer(); listen(1000) }
     }
@@ -234,10 +243,10 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             pendingPartial?.let { handler.removeCallbacks(it) }; pendingPartial = null
             when (error) {
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> return
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> listen(50)
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> listen(if (inCall) 800 else 50)
                 12, 13 -> { preferOffline = false; resetRecognizer(); listen(200) }   // offline language unavailable
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> { resetRecognizer(); listen(1200) }
-                else -> { resetRecognizer(); listen(600) }
+                else -> { resetRecognizer(); listen(if (inCall) 2000 else 600) }
             }
         }
         override fun onReadyForSpeech(p: Bundle?) {}
@@ -307,6 +316,42 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    // ---------- On-call mode ----------
+    // Detects phone calls and VoIP calls (WhatsApp, Meet, ...) through the audio mode; no extra permission needed.
+    private val callPoll = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val m = audio.mode
+            val now = m == AudioManager.MODE_IN_CALL || m == AudioManager.MODE_IN_COMMUNICATION
+            if (now != inCall) setInCall(now)
+            handler.postDelayed(this, 2000)
+        }
+    }
+
+    private fun startCallWatch() { handler.removeCallbacks(callPoll); handler.post(callPoll) }
+
+    private fun setInCall(now: Boolean) {
+        inCall = now; inCallNow = now
+        if (now) {
+            updateNotif("On a call · tap the bubble to give commands")
+            if (prefs().getBoolean("bubble_on", true)) bubble.show()
+            if (Build.VERSION.SDK_INT < 29) { handler.removeCallbacks(startRunnable); recognizer?.cancel() }
+        } else {
+            bubble.hide()
+            updateNotif("Listening for \"Hey Jarvis\"…")
+            listen(300)
+        }
+        onCall?.invoke(now)
+    }
+
+    /** A command typed in the app or in the call bubble (no wake word needed). */
+    private fun runTyped(raw: String) {
+        val t = raw.lowercase(Locale.getDefault()).trim().replace(Regex("^(hey\\s+)?jarvis[,\\s]*"), "")
+        if (!running || t.isEmpty()) return
+        updateNotif("Typed: $t")
+        process(t)
+    }
+
     private fun vibrate() { Haptics.click(this) }
 
     // An exact, unambiguous app name: safe to act on before the sentence is finished.
@@ -330,7 +375,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     // Speak one chunk; the first flushes, the rest queue behind it (used while an AI answer streams in).
     private fun speakChunk(chunk: String) {
-        if (!prefs().getBoolean("voice_on", true) || !ttsReady || chunk.isBlank()) return
+        if (!prefs().getBoolean("voice_on", true) || !ttsReady || chunk.isBlank() || (inCall && !prefs().getBoolean("speak_in_call", false))) return
         applyVoice()
         uttCounter++
         if (!speaking) {
@@ -407,7 +452,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (aiBusy) { reply("One moment, boss. I'm still thinking."); return }
         aiBusy = true
         streamActive = true
-        updateNotif("Thinking…"); onReply?.invoke("Thinking…")
+        updateNotif("Thinking…"); onReply?.invoke("Thinking…"); onOverlayReply?.invoke("Thinking…")
         val past = history.toList()
         val learn = prefs().getBoolean("learn_on", true)
         Thread {
@@ -473,7 +518,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                             if (tx.isEmpty()) continue
                             sb.append(tx); unspoken.append(tx)
                             val snap = sb.toString()
-                            handler.post { if (running) onReply?.invoke(snap) }
+                            handler.post { if (running) onReply?.invoke(snap); onOverlayReply?.invoke(snap) }
                             var mm = sentenceRegex.find(unspoken)
                             while (mm != null) {
                                 val chunk = mm.groupValues[1]
@@ -505,7 +550,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                 skills.lastAnswer = full
                 if (rest.isNotEmpty()) speakChunk(rest)
                 Haptics.confirm(this)
-                onReply?.invoke(full)
+                onReply?.invoke(full); onOverlayReply?.invoke(full)
                 postReply(full)
                 if (pending.get() <= 0) { speaking = false; listen(50) }
             }
@@ -532,7 +577,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private fun reply(text: String) {
         postReply(text)
         onReply?.invoke(text)
-        if (!prefs().getBoolean("voice_on", true) || !ttsReady) return
+        onOverlayReply?.invoke(text)
+        if (inCall) Haptics.confirm(this)
+        if (!prefs().getBoolean("voice_on", true) || !ttsReady || (inCall && !prefs().getBoolean("speak_in_call", false))) return
         speaking = true
         handler.removeCallbacks(startRunnable)
         recognizer?.cancel()
@@ -544,6 +591,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         running = false
         overlay.cancel()
+        bubble.hide()
+        onOverlayReply = null
+        inCallNow = false
         handler.removeCallbacksAndMessages(null)
         resetRecognizer()
         tts?.shutdown()

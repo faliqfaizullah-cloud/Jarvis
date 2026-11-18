@@ -185,6 +185,12 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private val resetGreeting = Runnable { greetingView.text = "Hello boss" }
 
+    private fun onCallChanged(c: Boolean) {
+        if (answerCard.visibility == View.VISIBLE) return
+        ui.removeCallbacks(resetGreeting)
+        greetingView.text = if (c) "On a call · tap the bubble for commands" else "Hello boss"
+    }
+
     private fun showHeard(t: String) {
         if (answerCard.visibility == View.VISIBLE) return
         greetingView.text = "“" + t.trim() + "”"
@@ -253,8 +259,10 @@ class MainActivity : Activity() {
         JarvisService.onReply = { t: String -> showAnswer(t) }
         JarvisService.onHeard = { t: String -> showHeard(t) }
         JarvisService.onLevel = { v: Float -> orb.pushLevel(v) }
+        JarvisService.onCall = { c: Boolean -> onCallChanged(c) }
+        onCallChanged(JarvisService.inCallNow)
     }
-    override fun onPause() { JarvisService.onReply = null; JarvisService.onHeard = null; JarvisService.onLevel = null; orb.stop(); wave.stop(); super.onPause() }
+    override fun onPause() { JarvisService.onReply = null; JarvisService.onHeard = null; JarvisService.onLevel = null; JarvisService.onCall = null; orb.stop(); wave.stop(); super.onPause() }
     override fun onDestroy() { previewTts?.shutdown(); variantTts?.shutdown(); super.onDestroy() }
 
     // ---- settings sheet ----
@@ -286,6 +294,12 @@ class MainActivity : Activity() {
         panel.addView(glassButton("Memory (" + Memory.all(this).size + ")") { d.dismiss(); showMemories() })
         panel.addView(switchRow("Let Jarvis learn from our chats", prefs().getBoolean("learn_on", true)) {
             prefs().edit().putBoolean("learn_on", it).apply()
+        })
+        panel.addView(switchRow("Floating Jarvis bubble during calls", prefs().getBoolean("bubble_on", true)) {
+            prefs().edit().putBoolean("bubble_on", it).apply()
+        })
+        panel.addView(switchRow("Speak replies during calls", prefs().getBoolean("speak_in_call", false)) {
+            prefs().edit().putBoolean("speak_in_call", it).apply()
         })
         panel.addView(glassButton("Check for updates (v" + Updater.installedVersion(this) + ")") { d.dismiss(); checkForUpdates(true) })
         panel.addView(glassButton("Set AI key (Claude)") { showKeyDialog() })
@@ -503,6 +517,7 @@ class MainActivity : Activity() {
                 "• flashlight on / volume up\n" +
                 "• change voice to Friday / next voice\n" +
                 "• remember that my wife is Sara / what do you remember / forget that\n" +
+                "• on a call: tap the floating Jarvis bubble, then type a command\n" +
                 "• check for updates\n" +
                 "• battery level / weather\n" +
                 "• what is 15 percent of 240\n" +
