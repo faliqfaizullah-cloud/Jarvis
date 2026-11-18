@@ -4,8 +4,8 @@ plugins {
 }
 
 // The release workflow passes the version from the git tag (v1.8.0 -> 1.8.0) and an ever-increasing build number.
-val appVersionName = (project.findProperty("appVersionName") as String?) ?: "1.7.0"
-val appVersionCode = ((project.findProperty("appVersionCode") as String?) ?: "110").toInt()
+val appVersionName = (project.findProperty("appVersionName") as String?) ?: "1.8.0"
+val appVersionCode = ((project.findProperty("appVersionCode") as String?) ?: "120").toInt()
 
 android {
     namespace = "com.jarvis.assistant"

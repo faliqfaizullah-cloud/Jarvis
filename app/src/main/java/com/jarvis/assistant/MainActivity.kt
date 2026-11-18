@@ -116,7 +116,7 @@ class MainActivity : Activity() {
         val chips = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(20), 0, dp(12), 0) }
         listOf("🔋 Battery" to "battery level", "⏰ 5 min timer" to "set a timer for 5 minutes",
             "📝 Notes" to "read my notes", "☀️ Weather" to "weather", "🌅 Briefing" to "good morning",
-            "🔦 Flashlight" to "flashlight").forEach { (label, cmd) ->
+            "🔦 Flashlight" to "flashlight", "🧠 Memory" to "what do you remember").forEach { (label, cmd) ->
             chips.addView(TextView(ctx).apply {
                 text = label; textSize = 14f; setTextColor(Color.WHITE)
                 setPadding(dp(16), dp(9), dp(16), dp(9))
@@ -283,6 +283,10 @@ class MainActivity : Activity() {
             if (it) Haptics.click(this)
         })
         panel.addView(glassButton("Voice pack: " + VoicePacks.get(prefs().getInt("voice_pack", 0)).name) { d.dismiss(); showVoicePacks() })
+        panel.addView(glassButton("Memory (" + Memory.all(this).size + ")") { d.dismiss(); showMemories() })
+        panel.addView(switchRow("Let Jarvis learn from our chats", prefs().getBoolean("learn_on", true)) {
+            prefs().edit().putBoolean("learn_on", it).apply()
+        })
         panel.addView(glassButton("Check for updates (v" + Updater.installedVersion(this) + ")") { d.dismiss(); checkForUpdates(true) })
         panel.addView(glassButton("Set AI key (Claude)") { showKeyDialog() })
         panel.addView(glassButton("Allow contacts (call & text)") {
@@ -305,6 +309,42 @@ class MainActivity : Activity() {
         d.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         d.window?.setLayout((resources.displayMetrics.widthPixels * 0.9f).toInt(), WRAP)
         d.show()
+    }
+
+    // ---- memory ----
+    private fun showMemories() {
+        val items = Memory.all(this)
+        val b = AlertDialog.Builder(this).setTitle("Memory (" + items.size + ")")
+        if (items.isEmpty()) {
+            b.setMessage("Nothing saved yet. Say “Hey Jarvis, remember that my wife's name is Sara”, or tap Add. Memories stay on this phone and are only sent to the AI as context when you ask it something.")
+        } else {
+            b.setItems(items.reversed().toTypedArray()) { _, which ->
+                val idx = items.size - 1 - which
+                AlertDialog.Builder(this).setTitle("Forget this?").setMessage(items[idx])
+                    .setPositiveButton("Forget") { _, _ -> Memory.remove(this, idx); Haptics.tick(this); showMemories() }
+                    .setNegativeButton("Keep") { _, _ -> showMemories() }
+                    .show()
+            }
+        }
+        b.setPositiveButton("Add") { _, _ -> showAddMemory() }
+        if (items.isNotEmpty()) {
+            b.setNeutralButton("Clear all") { _, _ ->
+                AlertDialog.Builder(this).setTitle("Clear all memories?").setMessage("Jarvis will forget everything it knows about you.")
+                    .setPositiveButton("Clear all") { _, _ -> Memory.clear(this); Haptics.heavy(this) }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        }
+        b.setNegativeButton("Close", null).show()
+    }
+
+    private fun showAddMemory() {
+        val et = EditText(this).apply { hint = "e.g. My wife's name is Sara"; setSingleLine(false) }
+        AlertDialog.Builder(this).setTitle("Add a memory").setView(et)
+            .setPositiveButton("Save") { _, _ ->
+                if (Memory.add(this, et.text.toString())) Haptics.confirm(this)
+                showMemories()
+            }
+            .setNegativeButton("Cancel", null).show()
     }
 
     // ---- in-app updates ----
@@ -462,6 +502,7 @@ class MainActivity : Activity() {
                 "• play lofi music\n" +
                 "• flashlight on / volume up\n" +
                 "• change voice to Friday / next voice\n" +
+                "• remember that my wife is Sara / what do you remember / forget that\n" +
                 "• check for updates\n" +
                 "• battery level / weather\n" +
                 "• what is 15 percent of 240\n" +

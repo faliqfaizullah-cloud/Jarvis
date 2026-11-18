@@ -386,6 +386,17 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     }
 
     // ---------- AI brain (Claude API, streamed: starts speaking after the first sentence) ----------
+    private val memoryRule = " When the user shares a lasting personal fact or preference (name, family, job, place, likes, routines), " +
+        "call save_memory with a short fact and say briefly that you'll remember it. Never save passwords, card numbers or other secrets."
+
+    private fun memoryTools() = JSONArray().put(JSONObject()
+        .put("name", "save_memory")
+        .put("description", "Save a durable fact about the user so you remember it in future conversations. Only for lasting facts, not passing remarks.")
+        .put("input_schema", JSONObject().put("type", "object")
+            .put("properties", JSONObject().put("fact", JSONObject().put("type", "string")
+                .put("description", "Short fact, e.g. Wife's name is Sara, or Prefers tea over coffee")))
+            .put("required", JSONArray().put("fact"))))
+
     private val sentenceRegex = Regex("^(.{15,}?[.!?])\\s", RegexOption.DOT_MATCHES_ALL)
 
     private fun askAi(q: String) {
@@ -398,16 +409,24 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         streamActive = true
         updateNotif("Thinking…"); onReply?.invoke("Thinking…")
         val past = history.toList()
+        val learn = prefs().getBoolean("learn_on", true)
         Thread {
             val sb = StringBuilder()
             val unspoken = StringBuilder()
             var err: String? = null
+            var inTool = false
+            var saved = false
+            val toolBuf = StringBuilder()
             try {
                 val msgs = JSONArray()
                 for ((role, t) in past) msgs.put(JSONObject().put("role", role).put("content", t))
                 msgs.put(JSONObject().put("role", "user").put("content", q))
+                val sys = SYSTEM + " Current date and time: " +
+                    SimpleDateFormat("EEEE, MMMM d, yyyy h:mm a", Locale.US).format(Date()) + "." +
+                    (if (learn) memoryRule else "") + Memory.promptBlock(this)
                 val body = JSONObject().put("model", MODEL).put("max_tokens", 350).put("stream", true)
-                    .put("system", SYSTEM).put("messages", msgs)
+                    .put("system", sys).put("messages", msgs)
+                if (learn) body.put("tools", memoryTools())
                 val conn = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.connectTimeout = 10000; conn.readTimeout = 40000; conn.doOutput = true
@@ -428,8 +447,29 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                             val line = rd.readLine() ?: break
                             if (!line.startsWith("data:")) continue
                             val j = try { JSONObject(line.substring(5).trim()) } catch (e: Exception) { continue }
-                            if (j.optString("type") != "content_block_delta") continue
-                            val tx = j.optJSONObject("delta")?.optString("text").orEmpty()
+                            val type = j.optString("type")
+                            if (type == "content_block_start") {
+                                val cb = j.optJSONObject("content_block")
+                                if (cb != null && cb.optString("type") == "tool_use" && cb.optString("name") == "save_memory") {
+                                    inTool = true; toolBuf.setLength(0)
+                                }
+                                continue
+                            }
+                            if (type == "content_block_stop") {
+                                if (inTool) {
+                                    inTool = false
+                                    val fact = try { JSONObject(toolBuf.toString()).optString("fact") } catch (e: Exception) { "" }
+                                    if (fact.isNotBlank()) { saved = true; handler.post { Memory.add(this, fact) } }
+                                }
+                                continue
+                            }
+                            if (type != "content_block_delta") continue
+                            val delta = j.optJSONObject("delta") ?: continue
+                            if (delta.optString("type") == "input_json_delta") {
+                                if (inTool) toolBuf.append(delta.optString("partial_json"))
+                                continue
+                            }
+                            val tx = delta.optString("text")
                             if (tx.isEmpty()) continue
                             sb.append(tx); unspoken.append(tx)
                             val snap = sb.toString()
@@ -450,13 +490,15 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             val full = sb.toString().trim()
             val rest = unspoken.toString().trim()
             val e = err
+            val didSave = saved
             handler.post {
                 aiBusy = false
                 streamActive = false
                 if (!running) return@post
                 if (full.isEmpty()) {
-                    Haptics.error(this)
-                    reply(e ?: "I don't have an answer for that, boss."); return@post
+                    if (didSave) { Haptics.confirm(this); reply("Got it, boss. I'll remember that.") }
+                    else { Haptics.error(this); reply(e ?: "I don't have an answer for that, boss.") }
+                    return@post
                 }
                 history.add("user" to q); history.add("assistant" to full)
                 while (history.size > 8) history.removeAt(0)

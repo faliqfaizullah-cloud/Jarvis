@@ -32,7 +32,7 @@ class Skills(private val ctx: Context) {
 
     companion object {
         const val HELP = "I can open and close apps, set timers, alarms and reminders, take notes, call or text your contacts, " +
-            "search the web, navigate, play music, control the flashlight and volume, check your battery, do math, " +
+            "search the web, navigate, play music, control the flashlight and volume, check your battery, do math, remember things about you, " +
             "and answer any question with AI, boss."
     }
 
@@ -46,6 +46,27 @@ class Skills(private val ctx: Context) {
         if (Regex("^(what can you do|help|help me|what are your features|what can i say)$").matches(c)) return HELP
         if (Regex("^(good morning|morning|brief me|my briefing|daily briefing)$").matches(c)) return briefing()
 
+        // ---- memory ----
+        if (Regex("^(forget everything|forget it all|forget all of it|forget all memories|clear (your )?memory|wipe (your )?memory)$").matches(c)) {
+            val n = Memory.all(ctx).size
+            Memory.clear(ctx)
+            return if (n == 0) "My memory was already empty, boss." else "Done, boss. I've forgotten all $n memories."
+        }
+        if (Regex("^forget (that|the last one|the last thing|what i just said)$").matches(c))
+            return if (Memory.removeLast(ctx)) "Forgotten, boss." else "I have nothing to forget, boss."
+        m = Regex("^forget (?:about )?(?:that )?(.+)$").matchEntire(c)
+        if (m != null) {
+            val n = Memory.forget(ctx, m.groupValues[1])
+            return if (n > 0) "Forgotten, boss." else "I don't have anything about that, boss."
+        }
+        if (Regex("^(what do you (remember|know)( about me)?|what have you remembered|list (my )?memories|show (my )?memories)$").matches(c)) return recall()
+        m = Regex("^(?:my name is|i am called) (.+)$").matchEntire(c)
+        if (m != null) { Memory.add(ctx, "Name is " + m.groupValues[1]); return "Nice to meet you, ${m.groupValues[1]}. I'll remember that, boss." }
+        m = Regex("^call me (.+)$").matchEntire(c)
+        if (m != null) { Memory.add(ctx, "Prefers to be called " + m.groupValues[1]); return "Got it, I'll remember that, boss." }
+        m = Regex("^(?:remember|memorize|don't forget|do not forget)(?: that)? (.+)$").matchEntire(c)
+        if (m != null) return if (Memory.add(ctx, m.groupValues[1])) "Got it, boss. I'll remember that." else "I already know that, boss."
+
         // ---- timers, reminders, alarms ----
         m = Regex("^remind me to (.+?) (?:in|after) (.+)$").matchEntire(c)
         if (m != null) return setTimer(parseSecs(m.groupValues[2]), m.groupValues[1], true)
@@ -57,7 +78,7 @@ class Skills(private val ctx: Context) {
         if (m != null) return setAlarm(m.groupValues[1].toInt(), m.groupValues[2].toIntOrNull() ?: 0, m.groupValues[3])
 
         // ---- notes ----
-        m = Regex("^(?:take a note|make a note|add a note|note|remember that)[: ]+(.+)$").matchEntire(c)
+        m = Regex("^(?:take a note|make a note|add a note|note)[: ]+(.+)$").matchEntire(c)
         if (m != null) { addNote(m.groupValues[1]); return "Noted, boss." }
         if (Regex("^(read|show|what are) (my )?notes$").matches(c)) return readNotes()
         if (Regex("^(clear|delete) (all )?(my )?notes$").matches(c)) { prefs.edit().remove("notes").apply(); return "All notes cleared, boss." }
@@ -260,6 +281,14 @@ class Skills(private val ctx: Context) {
         return "Good day, boss. It's " + SimpleDateFormat("h:mm a", Locale.US).format(now) + " on " +
             SimpleDateFormat("EEEE, MMMM d", Locale.US).format(now) + ". " + battery() + " You have " +
             notes().size + " saved note" + (if (notes().size == 1) "." else "s.")
+    }
+
+    private fun recall(): String {
+        val l = Memory.all(ctx)
+        if (l.isEmpty()) return "I don't have any memories saved yet, boss. Tell me to remember something."
+        val last = l.takeLast(6).reversed()
+        return "I remember ${l.size} thing" + (if (l.size == 1) "" else "s") + ", boss. " +
+            last.joinToString(". ") + "." + (if (l.size > 6) " Open Memory in my settings to see the rest." else "")
     }
 
     // ---------- calculator ----------
