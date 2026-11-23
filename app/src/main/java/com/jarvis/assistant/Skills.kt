@@ -291,6 +291,12 @@ class Skills(private val ctx: Context) {
             last.joinToString(". ") + "." + (if (l.size > 6) " Open Memory in my settings to see the rest." else "")
     }
 
+    /** The answer when the command is a maths question (lets the service show the Calculating status first). */
+    fun calcResult(raw: String): String? {
+        val c = raw.trim().trimEnd('.', '?', '!').replace(Regex("\\s+"), " ")
+        return calc(c)
+    }
+
     // ---------- calculator ----------
     private fun num(d: Double): String =
         if (d == Math.floor(d) && Math.abs(d) < 1e12) d.toLong().toString()

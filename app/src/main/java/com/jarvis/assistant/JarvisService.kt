@@ -48,6 +48,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     }
     private lateinit var skills: Skills
     private lateinit var overlay: OrbOverlay
+    private lateinit var status: StatusOverlay
     private lateinit var bubble: CallBubble
     private val audio by lazy { getSystemService(AudioManager::class.java) }
     @Volatile private var inCall = false
@@ -95,6 +96,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         super.onCreate()
         skills = Skills(this)
         overlay = OrbOverlay(this)
+        status = StatusOverlay(this)
         bubble = CallBubble(this) { runTyped(it) }
         onOverlayReply = { t -> bubble.showReply(t) }
         getSystemService(NotificationManager::class.java)
@@ -124,6 +126,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (intent?.action == ACTION_STOP) {
             running = false
             overlay.cancel()
+            status.cancel()
             bubble.hide()
             handler.removeCallbacksAndMessages(null)
             resetRecognizer()
@@ -300,6 +303,11 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             } catch (e: Exception) { }
             return
         }
+        skills.calcResult(cmd)?.let { res ->
+            status.show("Calculating.")
+            handler.postDelayed({ status.hide(); reply(res) }, 1100)
+            return
+        }
         voiceCommand(cmd)?.let { reply(it); return }
         skills.tryHandle(cmd)?.let { reply(it); return }
         val open = openRegex.find(cmd)
@@ -428,6 +436,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                 reply("I couldn't open it, boss. Please allow display over other apps in my settings.")
             }
         }
+        status.show("Opening " + name.trim().replaceFirstChar { it.uppercase() } + ".")
+        status.hide(1500)
     }
 
     // ---------- AI brain (Claude API, streamed: starts speaking after the first sentence) ----------
@@ -452,7 +462,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         if (aiBusy) { reply("One moment, boss. I'm still thinking."); return }
         aiBusy = true
         streamActive = true
-        updateNotif("Thinking…"); onReply?.invoke("Thinking…"); onOverlayReply?.invoke("Thinking…")
+        updateNotif("Thinking…"); onReply?.invoke("Thinking…"); onOverlayReply?.invoke("Thinking…"); status.show("Analyzing.")
         val past = history.toList()
         val learn = prefs().getBoolean("learn_on", true)
         Thread {
@@ -517,6 +527,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                             val tx = delta.optString("text")
                             if (tx.isEmpty()) continue
                             sb.append(tx); unspoken.append(tx)
+                            if (sb.length == tx.length) handler.post { status.hide() }
                             val snap = sb.toString()
                             handler.post { if (running) onReply?.invoke(snap); onOverlayReply?.invoke(snap) }
                             var mm = sentenceRegex.find(unspoken)
@@ -539,6 +550,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             handler.post {
                 aiBusy = false
                 streamActive = false
+                status.hide()
                 if (!running) return@post
                 if (full.isEmpty()) {
                     if (didSave) { Haptics.confirm(this); reply("Got it, boss. I'll remember that.") }
@@ -591,6 +603,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         running = false
         overlay.cancel()
+        status.cancel()
         bubble.hide()
         onOverlayReply = null
         inCallNow = false
